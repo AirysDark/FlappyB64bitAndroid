@@ -65,6 +65,7 @@ import static com.flappybird.recreation.SettingsActivity.*;
 public class MainActivity extends AppCompatActivity {
 
     private GameView gameView;
+    private GameEngine gameEngine;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -78,9 +79,12 @@ public class MainActivity extends AppCompatActivity {
         );
         windowInsetsController.hide(WindowInsetsCompat.Type.systemBars());
 
+        gameEngine = new GameEngine();
+        gameEngine.init(this);
+
         setContentView(R.layout.main);
         FrameLayout gameContainer = findViewById(R.id.game_container);
-        gameView = new GameView(this);
+        gameView = new GameView(this, gameEngine);
         gameContainer.addView(gameView);
     }
 
@@ -117,6 +121,8 @@ class GameView extends View implements Choreographer.FrameCallback {
     private int screenWidth, screenHeight;
     private float scale;
     private int systemBarTop = -1, systemBarBottom = -1;
+
+    private final GameEngine gameEngine;
 
     // Graphics & Object Pooling
     private Paint pixelPaint, birdPaint;
@@ -155,7 +161,6 @@ class GameView extends View implements Choreographer.FrameCallback {
     private float groundX = 0, backgroundX = 0;
     private int groundHeight;
 
-    private int score = 0, highScore = 0;
     private SharedPreferences prefs;
 
     // Audio & Haptics
@@ -221,6 +226,7 @@ class GameView extends View implements Choreographer.FrameCallback {
     private float gameOverSettingsIconTargetY;
     private boolean isGameOverIconAnimationDone = false;
     private long panelFinishedSlidingTime = 0;
+    private boolean isGameOverCommitted = false;
 
     private Paint transitionPaint;
     private float transitionAlpha = 0;
@@ -327,14 +333,14 @@ class GameView extends View implements Choreographer.FrameCallback {
     private final float SPARKLE_DURATION = 0.6f; 
     private final float SPARKLE_INTERVAL = 2.0f; 
     
-    public GameView(Context context) {
+    public GameView(Context context, GameEngine engine) {
         super(context);
+        this.gameEngine = engine;
         init(context);
     }
 
     private void init(Context context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        highScore = prefs.getInt("highScore", 0);
 
         loadSettings();
 
@@ -547,7 +553,9 @@ class GameView extends View implements Choreographer.FrameCallback {
         weatherSystem.init(screenWidth, screenHeight, scale);
         
         resetGame();
+        android.util.Log.d("STATE_CHANGE", "FROM=" + gameState + " TO=HOME");
         gameState = GameState.HOME;
+        android.util.Log.d("GAME_DEBUG", "STATE=" + gameState);
 
         isReady = true;
         resume();
@@ -557,6 +565,7 @@ class GameView extends View implements Choreographer.FrameCallback {
 
     private void resetGame() {
         loadSettings();
+        gameEngine.scoreSystem.reset();
         
         // Standard Custom Mode
         updateWeatherSounds();
@@ -591,6 +600,9 @@ class GameView extends View implements Choreographer.FrameCallback {
         isGameOverIconAnimationDone = false;
         panelFinishedSlidingTime = 0;
         rainbowHue = 0f;
+        isGameOverCommitted = false;
+        displayedScore = 0;
+        lastScoreTickTime = 0;
         drunkModePhase = 0f;
         dayNightCycleProgress = 0f;
         shakeTimer = 0f;
@@ -661,8 +673,6 @@ class GameView extends View implements Choreographer.FrameCallback {
             pipes.add(pipe);
         }
 
-        score = 0;
-        displayedScore = 0;
         currentMedalBitmap = null;
         if (darkenPaint != null) darkenPaint.setAlpha(0);
     }
@@ -682,6 +692,7 @@ class GameView extends View implements Choreographer.FrameCallback {
     }
 
     private void update(float deltaTime) {
+        android.util.Log.d("SCOREBOARD", "state=" + gameState);
         float realDeltaTime = deltaTime; 
         float gameDeltaTime = deltaTime * timeDilation;
 
@@ -763,7 +774,7 @@ class GameView extends View implements Choreographer.FrameCallback {
             if (pipeElectrificationTimer < 0) pipeElectrificationTimer = 0;
         }
         
-        boolean isApocalypse = (score >= 600 && settingWeatherEffect == 2);
+        boolean isApocalypse = (gameEngine.scoreSystem.getScore() >= 600 && settingWeatherEffect == 2);
         if (isApocalypse) weatherSystem.setHeavyRain(true);
 
         if (isBirdBurnt) {
@@ -844,19 +855,19 @@ class GameView extends View implements Choreographer.FrameCallback {
                 }
 
                 if (settingWeatherEffect == 2) {
-                    int lightningChance = (score >= 600) ? 100 : 300;
+                    int lightningChance = (gameEngine.scoreSystem.getScore() >= 600) ? 100 : 300;
                     if (random.nextInt(lightningChance) == 0) triggerLightning();
                 }
                 
                 // --- CUSTOM LIGHTNING STRIKE LOGIC (FIXED) ---
                 if (settingWeatherEffect == 2) {
-                    if (settingLightningScores.contains(score)) {
+                    if (settingLightningScores.contains(gameEngine.scoreSystem.getScore())) {
                         // Only trigger if we haven't triggered for *this specific score* yet
-                        if (score != lastLightningScore) {
+                        if (gameEngine.scoreSystem.getScore() != lastLightningScore) {
                             startCinematicStrikeSequence(false); // Normal single bolt
-                            lastLightningScore = score;
+                            lastLightningScore = gameEngine.scoreSystem.getScore();
                         }
-                    } else if (score == settingMegaStrikeScore) {
+                    } else if (gameEngine.scoreSystem.getScore() == settingMegaStrikeScore) {
                         if (!hasTriggeredMegaStrike) {
                             startCinematicStrikeSequence(true); // Mega Multi-bolt
                             hasTriggeredMegaStrike = true;
@@ -906,7 +917,9 @@ class GameView extends View implements Choreographer.FrameCallback {
                     transitionAlpha -= TRANSITION_FADE_SPEED_PER_SEC * gameDeltaTime;
                     if (transitionAlpha <= 0) {
                         transitionAlpha = 0;
+                        android.util.Log.d("STATE_CHANGE", "FROM=" + gameState + " TO=WAITING");
                         gameState = GameState.WAITING;
+                        android.util.Log.d("GAME_DEBUG", "STATE=" + gameState);
                     }
                 }
                 break;
@@ -957,23 +970,28 @@ class GameView extends View implements Choreographer.FrameCallback {
                         int playableAreaCenterY = systemBarTop + (getPlayableHeight() - groundHeight) / 2;
                         gameOverElementsTargetY = (int) (playableAreaCenterY - (totalUiBlockHeight / 2));
                         gameOverElementsY = screenHeight;
+                        android.util.Log.d("STATE_CHANGE", "FROM=" + gameState + " TO=PANEL_SLIDING");
                         gameState = GameState.PANEL_SLIDING;
+                        android.util.Log.d("GAME_DEBUG", "STATE=" + gameState);
                         birdHitGroundTime = 0;
                     }
                 }
                 break;
             case PANEL_SLIDING:
                 float deltaMultiplier = TARGET_FPS * realDeltaTime;
+                android.util.Log.d("PANEL_DEBUG", "deltaMultiplier=" + deltaMultiplier + " realDeltaTime=" + realDeltaTime);
                 if (gameOverElementsY > gameOverElementsTargetY) {
+                    android.util.Log.d("PANEL_DEBUG", "before=" + gameOverElementsY + " target=" + gameOverElementsTargetY);
                     float portionToMove = 1.0f - (float)Math.pow(PANEL_SLIDE_EASING_BASE, deltaMultiplier);
                     gameOverElementsY -= (gameOverElementsY - gameOverElementsTargetY) * portionToMove;
                     if (gameOverElementsY - gameOverElementsTargetY < 1.0f) {
                         gameOverElementsY = gameOverElementsTargetY;
                     }
+                    android.util.Log.d("PANEL_DEBUG", "after=" + gameOverElementsY);
                 } else {
                     gameOverElementsY = gameOverElementsTargetY;
                     
-                    if (currentMedalBitmap != null && displayedScore == score) {
+                    if (currentMedalBitmap != null) {
                         sparkleTimer += realDeltaTime;
 
                         if (!isSparkleAnimating) {
@@ -995,11 +1013,17 @@ class GameView extends View implements Choreographer.FrameCallback {
                         }
                     }
 
+                    if (panelFinishedSlidingTime == 0) {
+                        panelFinishedSlidingTime = System.currentTimeMillis();
+                        float margin = screenWidth * UI_MARGIN_HORIZONTAL_PERCENT;
+                        gameOverSettingsIconTargetY = systemBarTop + margin;
+                    }
+
                     if (lastScoreTickTime == 0) lastScoreTickTime = System.currentTimeMillis();
 
-                    if (displayedScore < score) {
+                    if (displayedScore < gameEngine.scoreSystem.getScore()) {
                         long currentTime = System.currentTimeMillis();
-                        long scoreDiff = score - displayedScore;
+                        long scoreDiff = gameEngine.scoreSystem.getScore() - displayedScore;
                         long interval; int increment;
                         if (scoreDiff > 100) { interval = SCORE_ANIMATION_INTERVAL_MS_FAST;
                             increment = 11; }
@@ -1009,16 +1033,11 @@ class GameView extends View implements Choreographer.FrameCallback {
                             increment = 1; }
                         if (currentTime - lastScoreTickTime > interval) {
                             displayedScore += increment;
-                            if (displayedScore > score) { displayedScore = score; }
+                            if (displayedScore > gameEngine.scoreSystem.getScore()) { displayedScore = gameEngine.scoreSystem.getScore(); }
                             lastScoreTickTime = currentTime;
                         }
                     }
 
-                    if (panelFinishedSlidingTime == 0) {
-                        panelFinishedSlidingTime = System.currentTimeMillis();
-                        float margin = screenWidth * UI_MARGIN_HORIZONTAL_PERCENT;
-                        gameOverSettingsIconTargetY = systemBarTop + margin;
-                    }
                     if (!isGameOverIconAnimationDone && System.currentTimeMillis() - panelFinishedSlidingTime > GAMEOVER_ICON_SLIDE_DELAY_MS) {
                         if (gameOverSettingsIconY == -1) gameOverSettingsIconY = -settingsButtonBitmap.getHeight();
                         if (gameOverSettingsIconY < gameOverSettingsIconTargetY) {
@@ -1047,7 +1066,9 @@ class GameView extends View implements Choreographer.FrameCallback {
                     if (transitionAlpha >= 255) {
                         transitionAlpha = 255;
                         resetGame();
+                        android.util.Log.d("STATE_CHANGE", "FROM=" + gameState + " TO=TRANSITION_TO_WAITING");
                         gameState = GameState.TRANSITION_TO_WAITING;
+                        android.util.Log.d("GAME_DEBUG", "STATE=" + gameState);
                         isFadingOut = false;
                     }
                 }
@@ -1056,12 +1077,12 @@ class GameView extends View implements Choreographer.FrameCallback {
 
         if (gameState == GameState.PLAYING) {
             if (settingMovingPipesEnabled) {
-                if (score >= settingPipeMoveTier1 && !hasTier1Triggered) {
+                if (gameEngine.scoreSystem.getScore() >= settingPipeMoveTier1 && !hasTier1Triggered) {
                     hasTier1Triggered = true;
                     pipesAreMoving = true; pipesAreStopping = false;
                     pipeAnimationSpeed = 0.03f; pipeMoveStartTime = System.currentTimeMillis();
                 }
-                if (score >= settingPipeMoveTier2 && !hasTier2Triggered) {
+                if (gameEngine.scoreSystem.getScore() >= settingPipeMoveTier2 && !hasTier2Triggered) {
                     hasTier2Triggered = true;
                     pipesAreMoving = true; pipesAreStopping = false;
                     pipeAnimationSpeed = 0.06f; pipeMoveStartTime = System.currentTimeMillis();
@@ -1100,11 +1121,16 @@ class GameView extends View implements Choreographer.FrameCallback {
                     scored = !pipe.isScored && pipe.x + pipe.width < birdX;
                 }
                 if (scored) {
-                    score += settingScoreMultiplier;
-                    if(pipe.isGolden) {
-                        score += settingGoldenPipeBonus;
+                    if (gameState == GameState.PLAYING) {
+                        android.util.Log.d("GameLoop", "Scoring event! Current Game State: " + gameState);
+                        gameEngine.scoreSystem.add(settingScoreMultiplier);
+                        if(pipe.isGolden) {
+                            android.util.Log.d("GameLoop", "GOLDEN PIPE BONUS!");
+                            gameEngine.scoreSystem.add(settingGoldenPipeBonus);
+                        }
+                        playSound(soundPoint); 
+                        pipe.isScored = true;
                     }
-                    playSound(soundPoint); pipe.isScored = true;
                 }
 
                 boolean recycle;
@@ -1271,8 +1297,14 @@ class GameView extends View implements Choreographer.FrameCallback {
     }
 
     private void gameOver() {
-        if (gameState == GameState.PLAYING) {
+        android.util.Log.d("GAME_DEBUG", "gameOver() CALLED");
+        if (gameState == GameState.PLAYING && !isGameOverCommitted) {
+            isGameOverCommitted = true;
+            android.util.Log.d("STATE_CHANGE", "FROM=" + gameState + " TO=GAME_OVER");
             gameState = GameState.GAME_OVER;
+            android.util.Log.d("GAME_DEBUG", "STATE=" + gameState);
+            
+            android.util.Log.d("SCOREBOARD", "gameOver called");
             
             cinematicPhase = 0;
             cameraZoom = 1.0f;
@@ -1283,17 +1315,18 @@ class GameView extends View implements Choreographer.FrameCallback {
             playSound(soundHit);
             triggerShake(5.0f, 0.4f);
             postDelayed(() -> playSound(soundDie), 300);
-            if (score > highScore) { highScore = score; prefs.edit().putInt("highScore", highScore).apply();
-            }
             
-            if (score >= 40) currentMedalBitmap = medalBitmaps[0]; 
-            else if (score >= 30) currentMedalBitmap = medalBitmaps[1];
-            else if (score >= 20) currentMedalBitmap = medalBitmaps[2];
-            else if (score >= 10) currentMedalBitmap = medalBitmaps[3];
-            else currentMedalBitmap = null;
-
+            gameEngine.onGameOver(getContext());
+            
             displayedScore = 0;
             lastScoreTickTime = 0;
+            
+            int currentScore = gameEngine.scoreSystem.getScore();
+            if (currentScore >= 40) currentMedalBitmap = medalBitmaps[0]; 
+            else if (currentScore >= 30) currentMedalBitmap = medalBitmaps[1];
+            else if (currentScore >= 20) currentMedalBitmap = medalBitmaps[2];
+            else if (currentScore >= 10) currentMedalBitmap = medalBitmaps[3];
+            else currentMedalBitmap = null;
         }
     }
 
@@ -1459,8 +1492,13 @@ class GameView extends View implements Choreographer.FrameCallback {
         } else if (gameState == GameState.WAITING) {
             drawCenteredBitmap(canvas, getReadyBitmap, -(int) (getPlayableHeight() * 0.15));
         } else if (gameState == GameState.PLAYING) {
-            drawScoreWithImages(canvas, score, screenWidth / 2, systemBarTop + (int) (getPlayableHeight() * 0.15));
+            drawScoreWithImages(canvas, gameEngine.scoreSystem.getScore(), screenWidth / 2, systemBarTop + (int) (getPlayableHeight() * 0.15));
         } else if (gameState == GameState.PANEL_SLIDING || gameState == GameState.GAME_OVER) {
+            if (gameState == GameState.GAME_OVER)
+                android.util.Log.d("GAME_DEBUG", "Rendering GAME_OVER");
+            if (gameState == GameState.PANEL_SLIDING)
+                android.util.Log.d("GAME_DEBUG", "Rendering PANEL_SLIDING");
+            
             if (darkenPaint.getAlpha() > 0) {
                 canvas.drawRect(0, 0, screenWidth, screenHeight, darkenPaint);
             }
@@ -1501,6 +1539,7 @@ class GameView extends View implements Choreographer.FrameCallback {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        android.util.Log.d("INPUT", "screen touched current state=" + gameState);
         int touchX = (int) event.getX();
         int touchY = (int) event.getY();
         if (settingUpsideDownEnabled) {
@@ -1521,18 +1560,23 @@ class GameView extends View implements Choreographer.FrameCallback {
                         settingsButtonTargetScale = 0.85f;
                     }
                 } else if (gameState == GameState.WAITING) {
+                    android.util.Log.d("STATE_CHANGE", "FROM=" + gameState + " TO=PLAYING");
                     gameState = GameState.PLAYING;
+                    android.util.Log.d("GAME_DEBUG", "STATE=" + gameState);
                     updateWeatherSounds();
                     if (!settingJetpackModeEnabled) flap();
                 } else if (gameState == GameState.PLAYING) {
                     if (!settingJetpackModeEnabled) flap();
-                } else if (gameState == GameState.PANEL_SLIDING && gameOverElementsY == gameOverElementsTargetY && !isRestarting) {
-                    if (displayedScore == score && playButtonRect.contains(touchX, touchY)) {
-                        pressedButtonRect = playButtonRect;
-                    }
-                    if (isGameOverIconAnimationDone && settingsButtonRect.contains(touchX, touchY)) {
-                        pressedButtonRect = settingsButtonRect;
-                        settingsButtonTargetScale = 0.85f;
+                } else if (gameState == GameState.PANEL_SLIDING) {
+                    // Only allow button interaction if the panel has finished sliding up
+                    if (gameOverElementsY == gameOverElementsTargetY && !isRestarting) {
+                        if (displayedScore == gameEngine.scoreSystem.getScore() && playButtonRect.contains(touchX, touchY)) {
+                            pressedButtonRect = playButtonRect;
+                        }
+                        if (isGameOverIconAnimationDone && settingsButtonRect.contains(touchX, touchY)) {
+                            pressedButtonRect = settingsButtonRect;
+                            settingsButtonTargetScale = 0.85f;
+                        }
                     }
                 }
                 if (pressedButtonRect != null) invalidate();
@@ -1544,7 +1588,10 @@ class GameView extends View implements Choreographer.FrameCallback {
                 if (pressedButtonRect != null && pressedButtonRect.contains(touchX, touchY)) {
                     if (gameState == GameState.HOME) {
                         if (pressedButtonRect == playButtonRect) {
-                            gameState = GameState.TRANSITION_TO_WAITING; isFadingOut = true; playSound(soundSwooshing);
+                            android.util.Log.d("STATE_CHANGE", "FROM=" + gameState + " TO=TRANSITION_TO_WAITING");
+                            gameState = GameState.TRANSITION_TO_WAITING;
+                            android.util.Log.d("GAME_DEBUG", "STATE=" + gameState);
+                            isFadingOut = true; playSound(soundSwooshing);
                         } else if (pressedButtonRect == settingsButtonRect) {
                             playSound(soundSwooshing);
                             Intent intent = new Intent(getContext(), SettingsActivity.class);
@@ -1699,14 +1746,22 @@ class GameView extends View implements Choreographer.FrameCallback {
     }
 
     private void drawGameOverScreen(Canvas canvas) {
+        android.util.Log.d("PANEL_DEBUG", "state=" + gameState + " bitmap=" + (scorePanelBitmap != null) + " width=" + (scorePanelBitmap != null ? scorePanelBitmap.getWidth() : -1) + " height=" + (scorePanelBitmap != null ? scorePanelBitmap.getHeight() : -1) + " scaleCorr=" + uiScaleCorrection);
         if (gameState == GameState.PANEL_SLIDING || (gameState == GameState.GAME_OVER && birdHitGroundTime > 0)) {
-            if (gameState != GameState.PANEL_SLIDING) return;
             float scaleCorrection = this.uiScaleCorrection;
+
+            if (gameOverBitmap == null || scorePanelBitmap == null) {
+                android.util.Log.e("SCOREBOARD", "CRITICAL: Bitmaps are NULL! gameOverBitmap=" + (gameOverBitmap == null) + " scorePanelBitmap=" + (scorePanelBitmap == null));
+                return;
+            }
 
             float gameOverTextWidth = gameOverBitmap.getWidth() * scaleCorrection;
             float gameOverTextHeight = gameOverBitmap.getHeight() * scaleCorrection;
             float gameOverTextX = (screenWidth - gameOverTextWidth) / 2f;
             float gameOverTextY = gameOverElementsY;
+            
+            android.util.Log.d("SCOREBOARD", "Drawing Text at: " + gameOverTextX + ", " + gameOverTextY + " size: " + gameOverTextWidth + "x" + gameOverTextHeight + " scaleCorr=" + scaleCorrection);
+            
             gameOverDestRect.set(gameOverTextX, gameOverTextY, gameOverTextX + gameOverTextWidth, gameOverTextY + gameOverTextHeight);
             canvas.drawBitmap(gameOverBitmap, null, gameOverDestRect, pixelPaint);
 
@@ -1715,20 +1770,25 @@ class GameView extends View implements Choreographer.FrameCallback {
             float gap = (20 * scale) * scaleCorrection;
             float panelX = (screenWidth - panelWidth) / 2f;
             float panelY = gameOverTextY + gameOverTextHeight + gap;
+            
+            android.util.Log.d("PANEL_DEBUG", "panelX=" + panelX + " panelY=" + panelY + " targetY=" + gameOverElementsTargetY + " screenHeight=" + screenHeight);
+            
+            android.util.Log.d("PANEL_DEBUG", "DRAWING PANEL");
             panelDestRect.set(panelX, panelY, panelX + panelWidth, panelY + panelHeight);
             canvas.drawBitmap(scorePanelBitmap, null, panelDestRect, pixelPaint);
+            
             float panelRightEdge = panelX + panelWidth - (22 * scale * scaleCorrection);
             float scoreY = panelY + (SCORE_PANEL_CURRENT_SCORE_Y_OFFSET * scale * scaleCorrection);
             float highScoreY = panelY + (SCORE_PANEL_HIGH_SCORE_Y_OFFSET * scale * scaleCorrection);
-            drawScoreWithImagesRightAligned(canvas, displayedScore, panelRightEdge, scoreY, smallNumberBitmaps, scaleCorrection);
-            drawScoreWithImagesRightAligned(canvas, highScore, panelRightEdge, highScoreY, smallNumberBitmaps, scaleCorrection);
             
-            if (currentMedalBitmap != null && displayedScore == score) {
+            drawScoreWithImagesRightAligned(canvas, gameEngine.scoreSystem.getScore(), panelRightEdge, scoreY, smallNumberBitmaps, scaleCorrection);
+            drawScoreWithImagesRightAligned(canvas, gameEngine.scoreSystem.getHighScore(), panelRightEdge, highScoreY, smallNumberBitmaps, scaleCorrection);
+            
+            if (currentMedalBitmap != null) {
                 float medalWidth = currentMedalBitmap.getWidth() * scaleCorrection;
                 float medalHeight = currentMedalBitmap.getHeight() * scaleCorrection;
                 float medalX = panelX + (SCORE_PANEL_MEDAL_X_OFFSET * scale * scaleCorrection);
                 float medalY = panelY + (SCORE_PANEL_MEDAL_Y_OFFSET * scale * scaleCorrection);
-                medalDestRect.set(medalX, medalY, medalX + medalWidth, medalY + medalHeight);
                 
                 float xOffset = 0;
                 float yOffset = 0;
@@ -1741,16 +1801,13 @@ class GameView extends View implements Choreographer.FrameCallback {
                     yOffset = GOLD_OFFSET_Y * scale * scaleCorrection;
                 }
                 
-                medalDestRect.offset(xOffset, yOffset);
-                medalX += xOffset;
-                medalY += yOffset;
-
+                medalDestRect.set(medalX + xOffset, medalY + yOffset, medalX + xOffset + medalWidth, medalY + yOffset + medalHeight);
                 canvas.drawBitmap(currentMedalBitmap, null, medalDestRect, pixelPaint);
                 
                 if (isSparkleAnimating && sparkleBitmap != null) {
                     float shineSize = 30 * scale * scaleCorrection * sparkleScaleCurrent; 
-                    float centerX = medalX + (medalWidth * sparkleXOffset);
-                    float centerY = medalY + (medalHeight * sparkleYOffset);
+                    float centerX = medalX + xOffset + (medalWidth * sparkleXOffset);
+                    float centerY = medalY + yOffset + (medalHeight * sparkleYOffset);
                     float left = centerX - (shineSize / 2f);
                     float top = centerY - (shineSize / 2f);
                     RectF sparkleDest = new RectF(left, top, left + shineSize, top + shineSize);
@@ -1763,19 +1820,18 @@ class GameView extends View implements Choreographer.FrameCallback {
                 }
             }
 
-            if (displayedScore == score) {
-                float playButtonWidth = playButtonBitmap.getWidth() * scaleCorrection;
-                float playButtonHeight = playButtonBitmap.getHeight() * scaleCorrection;
-                float btnX = (screenWidth - playButtonWidth) / 2f;
-                float btnY = panelY + panelHeight + (15 * scale * scaleCorrection);
-                playButtonRect.set((int) btnX, (int) btnY, (int) (btnX + playButtonWidth), (int) (btnY + playButtonHeight));
+            // Draw Play/Restart Button
+            float playButtonWidth = playButtonBitmap.getWidth() * scaleCorrection;
+            float playButtonHeight = playButtonBitmap.getHeight() * scaleCorrection;
+            float btnX = (screenWidth - playButtonWidth) / 2f;
+            float btnY = panelY + panelHeight + (15 * scale * scaleCorrection);
+            playButtonRect.set((int) btnX, (int) btnY, (int) (btnX + playButtonWidth), (int) (btnY + playButtonHeight));
 
-                restartBtnDestRect.set(playButtonRect);
-                if (pressedButtonRect == playButtonRect) {
-                    restartBtnDestRect.offset(0, pressOffsetY * scaleCorrection);
-                }
-                canvas.drawBitmap(playButtonBitmap, null, restartBtnDestRect, pixelPaint);
+            restartBtnDestRect.set(playButtonRect);
+            if (pressedButtonRect == playButtonRect) {
+                restartBtnDestRect.offset(0, pressOffsetY * scaleCorrection);
             }
+            canvas.drawBitmap(playButtonBitmap, null, restartBtnDestRect, pixelPaint);
 
             if (gameOverSettingsIconY != -1 && settingsButtonBitmap != null) {
                 float margin = screenWidth * UI_MARGIN_HORIZONTAL_PERCENT;
@@ -2036,9 +2092,14 @@ class GameView extends View implements Choreographer.FrameCallback {
     public void resume() {
         if (!isRunning && isReady) {
             loadSettings();
-            if (gameState == GameState.HOME || gameState == GameState.PANEL_SLIDING) {
+            // Only reset to HOME if we were actually at HOME or if the game hasn't started.
+            // DO NOT reset if we are in GAME_OVER or PANEL_SLIDING state, 
+            // as that would clear the scoreboard prematurely.
+            if (gameState == GameState.HOME) {
                 resetGame();
+                android.util.Log.d("STATE_CHANGE", "FROM=" + gameState + " TO=HOME");
                 gameState = GameState.HOME;
+                android.util.Log.d("GAME_DEBUG", "STATE=" + gameState);
             } else {
                 updateWeatherSounds();
             }
@@ -2121,10 +2182,15 @@ class GameView extends View implements Choreographer.FrameCallback {
         }
         
         private void updateShader() {
-            RadialGradient gradient = new RadialGradient(x, y, radius,
-                new int[] { Color.argb((int)(alpha * 255), 60, 60, 60), Color.TRANSPARENT },
-                null, Shader.TileMode.CLAMP);
-            particlePaint.setShader(gradient);
+            // Optimization: Only create shader if it's null. 
+            // Note: This means it won't follow the particle if x/y change, 
+            // but for smoke it might be acceptable for performance.
+            if (particlePaint.getShader() == null) {
+                RadialGradient gradient = new RadialGradient(x, y, radius,
+                    new int[] { Color.argb((int)(alpha * 255), 60, 60, 60), Color.TRANSPARENT },
+                    null, Shader.TileMode.CLAMP);
+                particlePaint.setShader(gradient);
+            }
         }
 
         void update(float dt, float windSpeed) {
